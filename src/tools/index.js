@@ -1,7 +1,7 @@
 /**
  * NodusAI MCP — Tool Handlers
  *
- * Payment model: $1 USDC = 3 Oracle signal queries. That's it.
+ * Payment model: $1 USDC = 3 Oracle signal queries (Base, Ethereum, Avalanche). That's it.
  * No tiers, no packages, no subscriptions.
  */
 
@@ -49,9 +49,9 @@ export async function nodusPricing() {
       amount:          "$1.00 USDC",
       queriesIncluded: 3,
       pricePerQuery:   "$0.33 USDC",
-      network:         "Base (Coinbase L2)",
+      network:         "Base, Ethereum, Avalanche (any EVM)",
       token:           "USDC",
-      protocol:        "x402 / EIP-3009 TransferWithAuthorization",
+      protocol:        "x402 / EIP-3009 TransferWithAuthorization (any EVM)",
     },
     howItWorks: [
       "1. Call nodus_get_payment_requirements to see what to pay",
