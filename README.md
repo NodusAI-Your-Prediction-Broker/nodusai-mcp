@@ -1,3 +1,5 @@
+ ![NodusAI MCP Server](./nodusai_banner.png)
+
 # NodusAI MCP Server
 
 > AI-Powered Signals for Prediction Markets — accessible to any AI agent via MCP.
