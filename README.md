@@ -10,7 +10,7 @@ AI agents connect to this server to get Oracle signals for [Polymarket](https://
 
 **One simple price: $1 USDC = 3 Oracle signal queries.**
 
-- **Network:** Base (Coinbase L2)
+- **Networks:** Base, Ethereum, Avalanche (any EVM chain)
 - **Token:** USDC
 - **Protocol:** x402 / EIP-3009 `TransferWithAuthorization`
 - **Non-custodial:** NodusAI never holds funds. Payments go directly on-chain.
