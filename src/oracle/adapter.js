@@ -1,18 +1,22 @@
 /**
  * NodusAI — Oracle Adapter
  *
- * Wraps the NodusAI /api/prediction endpoint.
- * Handles the full x402 payment handshake:
- *   GET /api/prediction?marketUrl=...
- *   → 402 with X-Payment-Required header
- *   → resubmit with X-PAYMENT + X-Session-Token
- *   → 200 with signal JSON
+ * Bridges AI agents to the NodusAI Oracle at nodusai.app.
  *
- * The Oracle uses Gemini 2.5 Flash with Google Search grounding.
- * Output always conforms to NodusAI's structured signal schema.
+ * Payment is handled entirely by nodusai.app:
+ *   - User connects wallet on nodusai.app
+ *   - Pays $1 USDC (Base, Ethereum, or Avalanche)
+ *   - Confirms transaction
+ *   - Receives a session token good for 3 queries
  *
- * 🔌 Set NODUSAI_API_BASE in your environment to point at the live server.
- *    Default: https://nodusai.app (production)
+ * This MCP server just forwards requests to nodusai.app/api/prediction
+ * using that session token. No on-chain logic here.
+ *
+ * Agent flow:
+ *   1. Agent visits https://nodusai.app to pay and get a session token
+ *   2. Agent calls nodus_get_signal with marketUrl + sessionToken
+ *   3. MCP server forwards to nodusai.app/api/prediction
+ *   4. Signal returned to agent
  */
 
 const NODUSAI_API_BASE = process.env.NODUSAI_API_BASE || "https://nodusai.app";
@@ -21,8 +25,8 @@ const NODUSAI_API_BASE = process.env.NODUSAI_API_BASE || "https://nodusai.app";
 export function detectPlatform(marketUrl) {
   if (!marketUrl) return "unknown";
   const url = marketUrl.toLowerCase();
-  if (url.includes("polymarket.com"))  return "polymarket";
-  if (url.includes("kalshi.com"))      return "kalshi";
+  if (url.includes("polymarket.com"))   return "polymarket";
+  if (url.includes("kalshi.com"))       return "kalshi";
   if (url.includes("manifold.markets")) return "manifold";
   return "unknown";
 }
@@ -38,9 +42,8 @@ export function validateMarketUrl(marketUrl) {
     const platform = detectPlatform(marketUrl);
     if (platform === "unknown") {
       return {
-        valid: false,
-        reason: "Unrecognized platform. Supported: polymarket.com, kalshi.com. " +
-                "Pass any valid market URL from these platforms.",
+        valid:  false,
+        reason: "Unrecognized platform. Supported: polymarket.com, kalshi.com.",
       };
     }
     return { valid: true, platform };
@@ -49,75 +52,26 @@ export function validateMarketUrl(marketUrl) {
   }
 }
 
-// ── Fetch payment requirements (step 1 of x402) ───────────────────────────────
-export async function fetchPaymentRequirements(marketUrl) {
-  const endpoint = `${NODUSAI_API_BASE}/api/prediction?marketUrl=${encodeURIComponent(marketUrl)}`;
-
-  try {
-    const response = await fetch(endpoint, { method: "GET" });
-
-    if (response.status === 402) {
-      const raw = response.headers.get("X-Payment-Required");
-      if (!raw) throw new Error("Server returned 402 but missing X-Payment-Required header");
-      const requirements = JSON.parse(Buffer.from(raw, "base64").toString("utf-8"));
-      return { status: 402, requirements };
-    }
-
-    if (response.status === 200) {
-      // No payment needed (e.g. valid session already provided via other means)
-      const signal = await response.json();
-      return { status: 200, signal };
-    }
-
-    throw new Error(`Unexpected status ${response.status} from NodusAI API`);
-  } catch (err) {
-    throw new Error(`Failed to reach NodusAI oracle: ${err.message}`);
+// ── Fetch signal from NodusAI Oracle ──────────────────────────────────────────
+/**
+ * Calls nodusai.app/api/prediction with the agent's session token.
+ * Session token is obtained by paying $1 USDC on nodusai.app.
+ *
+ * Optional: pass desiredOutcome to bias the query (e.g. "YES" or "NO")
+ */
+export async function fetchSignal(marketUrl, sessionToken, desiredOutcome = null) {
+  let endpoint = `${NODUSAI_API_BASE}/api/prediction?marketUrl=${encodeURIComponent(marketUrl)}`;
+  if (desiredOutcome) {
+    endpoint += `&outcome=${encodeURIComponent(desiredOutcome)}`;
   }
-}
-
-// ── Submit payment and get signal (step 2 of x402) ────────────────────────────
-export async function fetchSignalWithPayment(marketUrl, xPaymentHeader, sessionToken = null) {
-  const endpoint = `${NODUSAI_API_BASE}/api/prediction?marketUrl=${encodeURIComponent(marketUrl)}`;
 
   const headers = {
-    "Content-Type": "application/json",
-    "X-PAYMENT": xPaymentHeader,
+    "Content-Type":  "application/json",
+    "X-Session-Token": sessionToken,
   };
-  if (sessionToken) {
-    headers["X-Session-Token"] = sessionToken;
-  }
 
   try {
     const response = await fetch(endpoint, { method: "GET", headers });
-
-    if (response.status === 200) {
-      const signal = await response.json();
-      // Extract session token from response headers if server issued a new one
-      const newSessionToken = response.headers.get("X-Session-Token") || sessionToken;
-      return { success: true, signal, sessionToken: newSessionToken };
-    }
-
-    if (response.status === 402) {
-      return { success: false, reason: "Payment was not accepted by NodusAI server" };
-    }
-
-    const body = await response.text();
-    return { success: false, reason: `Oracle returned ${response.status}: ${body}` };
-
-  } catch (err) {
-    throw new Error(`Oracle request failed: ${err.message}`);
-  }
-}
-
-// ── Use existing session token (no new payment needed) ────────────────────────
-export async function fetchSignalWithSession(marketUrl, sessionToken) {
-  const endpoint = `${NODUSAI_API_BASE}/api/prediction?marketUrl=${encodeURIComponent(marketUrl)}`;
-
-  try {
-    const response = await fetch(endpoint, {
-      method: "GET",
-      headers: { "X-Session-Token": sessionToken },
-    });
 
     if (response.status === 200) {
       const signal = await response.json();
@@ -126,9 +80,18 @@ export async function fetchSignalWithSession(marketUrl, sessionToken) {
 
     if (response.status === 402) {
       return {
-        success: false,
-        reason: "Session expired or invalid. Please pay for a new session.",
+        success:      false,
         needsPayment: true,
+        reason:       "Session token invalid or expired. Please visit https://nodusai.app to pay $1 USDC and get a new session token.",
+        paymentUrl:   "https://nodusai.app",
+      };
+    }
+
+    if (response.status === 401) {
+      return {
+        success: false,
+        reason:  "Invalid session token. Please visit https://nodusai.app to get a valid session token.",
+        paymentUrl: "https://nodusai.app",
       };
     }
 
@@ -136,11 +99,11 @@ export async function fetchSignalWithSession(marketUrl, sessionToken) {
     return { success: false, reason: `Oracle returned ${response.status}: ${body}` };
 
   } catch (err) {
-    throw new Error(`Oracle request failed: ${err.message}`);
+    throw new Error(`Failed to reach NodusAI Oracle: ${err.message}`);
   }
 }
 
-// ── Validate signal schema (NodusAI structured output) ────────────────────────
+// ── Validate signal schema ─────────────────────────────────────────────────────
 export function validateSignalSchema(signal) {
   const required = [
     "market_name",
@@ -156,31 +119,31 @@ export function validateSignalSchema(signal) {
     }
   }
   if (typeof signal.probability !== "number" || signal.probability < 0 || signal.probability > 1) {
-    return { valid: false, reason: "Signal probability must be a number between 0 and 1" };
+    return { valid: false, reason: "probability must be a number between 0 and 1" };
   }
   if (!["HIGH", "MEDIUM", "LOW"].includes(signal.confidence_score)) {
-    return { valid: false, reason: "Signal confidence_score must be HIGH, MEDIUM, or LOW" };
+    return { valid: false, reason: "confidence_score must be HIGH, MEDIUM, or LOW" };
   }
   return { valid: true };
 }
 
-// ── Mock oracle response (for local dev / testing) ────────────────────────────
-export function mockOracleSignal(marketUrl) {
+// ── Mock signal for dev/testing ────────────────────────────────────────────────
+export function mockOracleSignal(marketUrl, desiredOutcome = null) {
   const platform = detectPlatform(marketUrl);
   return {
     market_name:       `[MOCK] Sample ${platform} prediction market`,
-    predicted_outcome: "YES",
+    predicted_outcome: desiredOutcome || "YES",
     probability:       0.73,
     confidence_score:  "HIGH",
     key_reasoning:
       "Based on current polling data, recent news coverage, and historical base rates " +
-      "for similar events, the YES outcome appears significantly more likely. " +
+      "for similar events, the predicted outcome appears significantly more likely. " +
       "Multiple grounding sources confirm this trend.",
     grounding_sources: [
       { title: "Reuters: Latest developments", url: "https://reuters.com/example" },
       { title: "Associated Press: Event update", url: "https://apnews.com/example" },
     ],
     _mock: true,
-    _note: "This is a mock signal for development. Wire NODUSAI_API_BASE to production.",
+    _note: "Mock signal for development. Set NODUSAI_API_BASE for production.",
   };
 }
