@@ -1,110 +1,115 @@
 /**
  * NodusAI MCP — Tool Handlers
  *
- * Payment model: $1 USDC = 3 Oracle signal queries (Base, Ethereum, Avalanche). That's it.
- * No tiers, no packages, no subscriptions.
+ * Payment is handled by nodusai.app — NOT by this MCP server.
+ *
+ * Agent flow:
+ *   1. Visit https://nodusai.app
+ *   2. Connect wallet (Base, Ethereum, or Avalanche)
+ *   3. Paste market URL + optional desired outcome
+ *   4. Pay $1 USDC → confirm transaction
+ *   5. Get session token (good for 3 queries)
+ *   6. Use session token here with nodus_get_signal
  */
+
+import {
+  validateMarketUrl,
+  detectPlatform,
+  fetchSignal,
+  validateSignalSchema,
+  mockOracleSignal,
+} from "../oracle/adapter.js";
 
 import {
   registerAgent,
   getAgentByWallet,
-  createSession,
-  validateSession,
-  incrementSessionQueryCount,
   logQuery,
   getStats,
   getQueryHistory,
   getAllQueries,
 } from "../db/registry.js";
 
-import {
-  validateMarketUrl,
-  detectPlatform,
-  fetchSignalWithPayment,
-  fetchSignalWithSession,
-  validateSignalSchema,
-  mockOracleSignal,
-} from "../oracle/adapter.js";
-
-import {
-  PRICING,
-  buildPaymentRequirements,
-  validatePaymentAuthorization,
-  mockPaymentHeader,
-} from "../payment/x402.js";
-
-const USE_MOCK_ORACLE = process.env.NODUSAI_MOCK === "true" ||
-  !process.env.NODUSAI_API_BASE;
+const USE_MOCK = process.env.NODUSAI_MOCK === "true" || !process.env.NODUSAI_API_BASE;
 
 const ok  = (data) => ({ content: [{ type: "text", text: JSON.stringify(data, null, 2) }] });
 const err = (msg)  => ({ content: [{ type: "text", text: `❌ ${msg}` }], isError: true });
-const pay = (data) => ({ content: [{ type: "text", text: JSON.stringify({ _status: 402, ...data }, null, 2) }] });
 
 // ── 1. nodus_pricing ───────────────────────────────────────────────────────────
 export async function nodusPricing() {
   return ok({
-    message:  "NodusAI Oracle — Pricing",
-    pricing:  PRICING,
-    payment: {
-      amount:          "$1.00 USDC",
-      queriesIncluded: 3,
+    message: "NodusAI Oracle — Pricing & How to Connect",
+    pricing: {
+      cost:            "$1 USDC = 3 Oracle signal queries",
       pricePerQuery:   "$0.33 USDC",
-      network:         "Base, Ethereum, Avalanche (any EVM)",
+      networks:        ["Base", "Ethereum", "Avalanche"],
       token:           "USDC",
-      protocol:        "x402 / EIP-3009 TransferWithAuthorization (any EVM)",
     },
-    howItWorks: [
-      "1. Call nodus_get_payment_requirements to see what to pay",
-      "2. Sign $1 USDC TransferWithAuthorization with your Base wallet",
-      "3. Call nodus_get_signal with your signed xPaymentHeader",
-      "4. Receive Oracle signal + session token good for 3 queries total",
-      "5. Use nodus_query_with_session for your remaining 2 queries (free)",
-      "6. Need more? Pay another $1 for 3 more queries",
+    howToGetStarted: [
+      "1. Visit https://nodusai.app",
+      "2. Connect your wallet (Base, Ethereum, or Avalanche)",
+      "3. Paste a Polymarket or Kalshi market URL",
+      "4. (Optional) Add your desired outcome",
+      "5. Pay $1 USDC and confirm the transaction",
+      "6. Copy your session token",
+      "7. Use nodus_get_signal here with your session token",
     ],
-    note: "NodusAI is non-custodial. Payments go directly on Base — NodusAI never holds USDC.",
+    sessionDetails: {
+      queriesPerPayment: 3,
+      validity:          "24 hours",
+      note:              "One session token = 3 queries. After 3 queries, visit nodusai.app to pay again.",
+    },
+    paymentUrl: "https://nodusai.app",
   });
 }
 
-// ── 2. nodus_get_payment_requirements ─────────────────────────────────────────
-export async function nodusGetPaymentRequirements({ marketUrl }) {
-  const validation = validateMarketUrl(marketUrl);
-  if (!validation.valid) return err(validation.reason);
-
-  const requirements = buildPaymentRequirements();
-
-  return pay({
-    message: "Payment required to query the NodusAI Oracle",
-    marketUrl,
-    platform: validation.platform,
-    requirements,
-    instructions: [
-      "Sign a USDC TransferWithAuthorization (EIP-3009) for $1.00 using your Base wallet",
-      "Encode the signed payload as Base64",
-      "Call nodus_get_signal with marketUrl + xPaymentHeader",
-    ],
-  });
-}
-
-// ── 3. nodus_get_signal ────────────────────────────────────────────────────────
-export async function nodusGetSignal({ marketUrl, xPaymentHeader, walletAddress, agentName }) {
+// ── 2. nodus_get_signal ────────────────────────────────────────────────────────
+export async function nodusGetSignal({ marketUrl, sessionToken, desiredOutcome, walletAddress, agentName }) {
   const urlCheck = validateMarketUrl(marketUrl);
-  if (!urlCheck.valid)  return err(urlCheck.reason);
-  if (!xPaymentHeader)  return err("xPaymentHeader is required. Call nodus_get_payment_requirements first.");
-  if (!walletAddress)   return err("walletAddress is required (your Base wallet address).");
+  if (!urlCheck.valid) return err(urlCheck.reason);
 
-  // Validate $1 USDC payment
-  const paymentCheck = validatePaymentAuthorization(xPaymentHeader);
-  if (!paymentCheck.valid) return err(`Payment invalid: ${paymentCheck.reason}`);
+  if (!sessionToken) {
+    return err(
+      "sessionToken is required.\n\n" +
+      "To get a session token:\n" +
+      "1. Visit https://nodusai.app\n" +
+      "2. Connect your wallet\n" +
+      "3. Paste the market URL and pay $1 USDC\n" +
+      "4. Copy the session token and pass it here."
+    );
+  }
 
-  // Register agent (idempotent by wallet address)
-  const agent   = registerAgent({ name: agentName || "unnamed-agent", walletAddress });
   const platform = detectPlatform(marketUrl);
 
+  // Register agent if wallet provided
+  const agent = walletAddress
+    ? registerAgent({ name: agentName || "unnamed-agent", walletAddress })
+    : { id: "anonymous", name: agentName || "anonymous" };
+
   // Call Oracle
-  let signal, success, errorMessage;
+  let signal, success, errorMessage, needsPayment = false;
   try {
-    signal  = USE_MOCK_ORACLE ? mockOracleSignal(marketUrl) : (await fetchSignalWithPayment(marketUrl, xPaymentHeader)).signal;
-    success = true;
+    if (USE_MOCK) {
+      signal  = mockOracleSignal(marketUrl, desiredOutcome);
+      success = true;
+    } else {
+      const result = await fetchSignal(marketUrl, sessionToken, desiredOutcome);
+      if (result.needsPayment) {
+        return ok({
+          _status:    402,
+          message:    result.reason,
+          paymentUrl: "https://nodusai.app",
+          steps: [
+            "1. Visit https://nodusai.app",
+            "2. Connect your wallet",
+            "3. Pay $1 USDC to get a new session token",
+            "4. Call nodus_get_signal again with the new token",
+          ],
+        });
+      }
+      signal  = result.signal;
+      success = result.success;
+      if (!success) errorMessage = result.reason;
+    }
   } catch (e) {
     success      = false;
     errorMessage = e.message;
@@ -115,33 +120,20 @@ export async function nodusGetSignal({ marketUrl, xPaymentHeader, walletAddress,
     if (!check.valid) { success = false; errorMessage = check.reason; }
   }
 
-  // Create session: $1 paid → 3 queries available
-  const session = createSession({
-    agentId:     agent.id,
-    usdcPaid:    PRICING.usdc,
-    queriesTotal: PRICING.queries,
-    txReference: paymentCheck.txReference,
-  });
-
-  // Log to NodusAI registry
+  // Log to registry
   const entry = logQuery({
     agentId:      agent.id,
     agentName:    agent.name,
     marketUrl,
     platform,
-    sessionToken: session.token,
-    paymentMethod: "x402",
-    usdcCost:     success ? PRICING.usdc : 0,
-    txReference:  paymentCheck.txReference,
+    sessionToken,
+    desiredOutcome: desiredOutcome || null,
     signal,
     success,
     errorMessage,
   });
 
   if (!success) return err(errorMessage || "Oracle query failed");
-
-  // First query used — 2 remaining in session
-  incrementSessionQueryCount(session.token);
 
   return ok({
     queryId: entry.id,
@@ -153,106 +145,16 @@ export async function nodusGetSignal({ marketUrl, xPaymentHeader, walletAddress,
       key_reasoning:     signal.key_reasoning,
       grounding_sources: signal.grounding_sources,
     },
-    session: {
-      token:             session.token,
-      queriesTotal:      PRICING.queries,       // 3
-      queriesUsed:       1,
-      queriesRemaining:  PRICING.queries - 1,   // 2
-      expiresAt:         session.expiresAt,
-      note:              `2 queries remaining. Use nodus_query_with_session — no extra payment needed.`,
-    },
-    billing: {
-      usdcCharged:     PRICING.usdc,
-      queriesIncluded: PRICING.queries,
-      network:         "Base",
-      txReference:     paymentCheck.txReference,
+    meta: {
+      platform,
+      desiredOutcome: desiredOutcome || null,
+      queryId:        entry.id,
+      timestamp:      entry.timestamp,
     },
   });
 }
 
-// ── 4. nodus_query_with_session ────────────────────────────────────────────────
-export async function nodusQueryWithSession({ marketUrl, sessionToken, walletAddress }) {
-  const urlCheck = validateMarketUrl(marketUrl);
-  if (!urlCheck.valid) return err(urlCheck.reason);
-  if (!sessionToken)   return err("sessionToken is required. Call nodus_get_signal first (costs $1 USDC = 3 queries).");
-
-  const sessionCheck = validateSession(sessionToken);
-  if (!sessionCheck.valid) {
-    return pay({
-      message: `Session invalid: ${sessionCheck.reason}`,
-      action:  "Pay $1 USDC to get a new session with 3 queries.",
-    });
-  }
-
-  // Check queries remaining
-  const used      = sessionCheck.session.queryCount;
-  const remaining = PRICING.queries - used;
-  if (remaining <= 0) {
-    return pay({
-      message: "All 3 queries in this session have been used.",
-      action:  "Pay $1 USDC for a new session with 3 fresh queries.",
-      queriesUsed:      used,
-      queriesRemaining: 0,
-    });
-  }
-
-  const platform = detectPlatform(marketUrl);
-  let signal, success, errorMessage;
-
-  try {
-    signal  = USE_MOCK_ORACLE ? mockOracleSignal(marketUrl) : (await fetchSignalWithSession(marketUrl, sessionToken)).signal;
-    success = !!signal;
-  } catch (e) {
-    success      = false;
-    errorMessage = e.message;
-  }
-
-  if (success) {
-    incrementSessionQueryCount(sessionToken);
-    const agent = walletAddress ? registerAgent({ name: "agent", walletAddress }) : { id: sessionCheck.session.agentId, name: "agent" };
-    const entry = logQuery({
-      agentId:      sessionCheck.session.agentId,
-      agentName:    agent.name,
-      marketUrl,
-      platform,
-      sessionToken,
-      paymentMethod: "session",
-      usdcCost:     0,
-      txReference:  null,
-      signal,
-      success:      true,
-    });
-
-    const newUsed      = used + 1;
-    const newRemaining = PRICING.queries - newUsed;
-
-    return ok({
-      queryId: entry.id,
-      signal: {
-        market_name:       signal.market_name,
-        predicted_outcome: signal.predicted_outcome,
-        probability:       signal.probability,
-        confidence_score:  signal.confidence_score,
-        key_reasoning:     signal.key_reasoning,
-        grounding_sources: signal.grounding_sources,
-      },
-      session: {
-        token:            sessionToken,
-        queriesTotal:     PRICING.queries,
-        queriesUsed:      newUsed,
-        queriesRemaining: newRemaining,
-        expiresAt:        sessionCheck.session.expiresAt,
-        note:             newRemaining > 0
-          ? `${newRemaining} quer${newRemaining === 1 ? "y" : "ies"} remaining in this session.`
-          : "Session complete. Pay $1 USDC for 3 more queries.",
-      },
-    });
-  }
-
-  return err(errorMessage || "Oracle query failed");
-}
-
-// ── 5. nodus_verify_signal ─────────────────────────────────────────────────────
+// ── 3. nodus_verify_signal ─────────────────────────────────────────────────────
 export async function nodusVerifySignal({ queryId }) {
   if (!queryId) return err("queryId is required");
   const all   = getAllQueries(1000);
@@ -265,6 +167,7 @@ export async function nodusVerifySignal({ queryId }) {
     verified:          true,
     marketUrl:         entry.marketUrl,
     platform:          entry.platform,
+    desiredOutcome:    entry.desiredOutcome || null,
     timestamp:         entry.timestamp,
     signal: {
       market_name:       entry.signal.market_name,
@@ -274,11 +177,11 @@ export async function nodusVerifySignal({ queryId }) {
       key_reasoning:     entry.signal.key_reasoning,
     },
     grounding_sources: entry.signal.grounding_sources,
-    note:              "Verify these sources independently to audit the Oracle's reasoning.",
+    note: "Verify these sources independently to audit the Oracle's reasoning.",
   });
 }
 
-// ── 6. nodus_query_history ─────────────────────────────────────────────────────
+// ── 4. nodus_query_history ─────────────────────────────────────────────────────
 export async function nodusQueryHistory({ walletAddress, limit }) {
   if (!walletAddress) return err("walletAddress is required");
   const agent = getAgentByWallet(walletAddress);
@@ -293,36 +196,22 @@ export async function nodusQueryHistory({ walletAddress, limit }) {
       queryId:          q.id,
       marketUrl:        q.marketUrl,
       platform:         q.platform,
+      desiredOutcome:   q.desiredOutcome || null,
       predictedOutcome: q.signal?.predicted_outcome || null,
       probability:      q.signal?.probability ?? null,
       confidence:       q.signal?.confidence_score || null,
-      usdcCost:         q.usdcCost,
-      paymentMethod:    q.paymentMethod,
       success:          q.success,
       timestamp:        q.timestamp,
     })),
   });
 }
 
-// ── 7. nodus_admin_stats ───────────────────────────────────────────────────────
+// ── 5. nodus_admin_stats ───────────────────────────────────────────────────────
 export async function nodusAdminStats() {
   return ok({ message: "NodusAI Platform — Registry Stats", ...getStats() });
 }
 
-// ── 8. nodus_admin_queries ─────────────────────────────────────────────────────
+// ── 6. nodus_admin_queries ─────────────────────────────────────────────────────
 export async function nodusAdminQueries({ limit }) {
-  return ok({ message: "NodusAI Query Registry", total: limit || 50, queries: getAllQueries(limit || 50) });
-}
-
-// ── 9. nodus_mock_payment ──────────────────────────────────────────────────────
-export async function nodusMockPayment() {
-  const header = mockPaymentHeader();
-  return ok({
-    _dev_only:      true,
-    message:        "Mock X-PAYMENT header — local dev only",
-    xPaymentHeader: header,
-    amount_usdc:    PRICING.usdc,
-    queries:        PRICING.queries,
-    warning:        "This mock will NOT work against the production NodusAI server.",
-  });
+  return ok({ message: "NodusAI Query Registry", queries: getAllQueries(limit || 50) });
 }
