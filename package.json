@@ -1,7 +1,7 @@
 {
   "name": "nodusai-mcp-server",
   "version": "1.0.0",
-  "description": "NodusAI MCP Server — AI-powered prediction market signals via x402 micropayments",
+  "description": "NodusAI MCP Server — AI-powered prediction market signals for Polymarket and Kalshi",
   "type": "module",
   "main": "src/index.js",
   "bin": {
