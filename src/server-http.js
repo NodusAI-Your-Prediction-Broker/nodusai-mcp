@@ -204,6 +204,12 @@ app.get("/info", (_req, res) => {
   });
 });
 
+// ── GET /mcp ── Smithery gateway alias (same as /sse) ─────────────────────────
+app.get("/mcp", async (req, res) => {
+  req.url = "/sse";
+  app.handle(req, res);
+});
+
 // ── GET /sse ── agents connect here ───────────────────────────────────────────
 app.get("/sse", async (req, res) => {
   res.setHeader("Content-Type",  "text/event-stream");
