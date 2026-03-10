@@ -1,0 +1,26 @@
+{
+  "name": "nodusai-mcp-server",
+  "version": "1.0.0",
+  "description": "NodusAI MCP Server — AI-powered prediction market signals via x402 micropayments",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "nodusai-mcp": "./src/index.js"
+  },
+  "scripts": {
+    "start":      "node src/index.js",
+    "start:http": "node src/server-http.js",
+    "dev":        "NODUSAI_MOCK=true node --watch src/index.js",
+    "dev:http":   "NODUSAI_MOCK=true node --watch src/server-http.js",
+    "agent:js":   "node examples/agent-js/agent.js",
+    "agent:py":   "python examples/agent-python/agent.py"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^5.2.1",
+    "uuid": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
