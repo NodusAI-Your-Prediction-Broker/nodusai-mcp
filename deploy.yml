@@ -1,0 +1,86 @@
+name: Deploy NodusAI MCP Server
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Test ───────────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run end-to-end tests
+        env:
+          NODUSAI_MOCK: "true"
+        run: |
+          node -e "
+          import('./src/tools/index.js').then(async t => {
+            // 1. Pricing
+            const p = await t.nodusPricing();
+            const pd = JSON.parse(p.content[0].text);
+            if (!pd.per_query) throw new Error('Pricing failed');
+
+            // 2. Mock payment
+            const mp = await t.nodusMockPayment({});
+            const mpd = JSON.parse(mp.content[0].text);
+            if (!mpd.xPaymentHeader) throw new Error('Mock payment failed');
+
+            // 3. Get signal
+            const s = await t.nodusGetSignal({
+              marketUrl: 'https://polymarket.com/event/test',
+              xPaymentHeader: mpd.xPaymentHeader,
+              walletAddress: '0xTestWallet',
+              agentName: 'CI-Test-Agent',
+            });
+            const sd = JSON.parse(s.content[0].text);
+            if (!sd.signal?.probability) throw new Error('Signal failed');
+
+            // 4. Session query
+            const sq = await t.nodusQueryWithSession({
+              marketUrl: 'https://kalshi.com/markets/test',
+              sessionToken: sd.session.token,
+            });
+            const sqd = JSON.parse(sq.content[0].text);
+            if (!sqd.signal) throw new Error('Session query failed');
+
+            // 5. Admin stats
+            const a = await t.nodusAdminStats();
+            const ad = JSON.parse(a.content[0].text);
+            if (ad.total_queries < 1) throw new Error('Stats failed');
+
+            console.log('All tests passed ✅');
+            console.log('total_queries:', ad.total_queries);
+            console.log('signal probability:', sd.signal.probability);
+          }).catch(e => { console.error(e); process.exit(1); });
+          "
+
+  # ── Deploy to Railway ──────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service nodusai-mcp --detach
