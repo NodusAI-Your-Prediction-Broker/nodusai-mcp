@@ -1,216 +1,99 @@
 /**
- * NodusAI — Query Registry (Database Layer)
- *
- * Stores every signal request made through the MCP server:
- *   - Which agent queried, which market URL, when
- *   - The full Oracle response (signal JSON)
- *   - Payment metadata (session token, USDC amount, tx reference)
- *   - Success / error status
- *
- * Storage: JSON file (dev). Replace loadDB / saveDB with your
- * PostgreSQL / Supabase / MongoDB driver for production.
- *
- * Schema mirrors NodusAI's structured output format exactly.
+ * NodusAI — Agent & Query Registry
+ * Simple JSON file store. Replace with PostgreSQL/MongoDB for production.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { join, dirname } from "path";
+import fs   from "fs";
+import path from "path";
 import { fileURLToPath } from "url";
-import { randomUUID } from "crypto";
+import { v4 as uuidv4 } from "uuid";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, "../../data");
-const DB_PATH  = join(DATA_DIR, "nodusai-registry.json");
-
-if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
-
-const DEFAULT_DB = {
-  sessions: {},      // sessionToken → { agentId, createdAt, queryCount, expiresAt }
-  queries:  [],      // full query log — the core registry
-  agents:   {},      // agentId → { name, walletAddress, createdAt }
-  stats: {
-    total_queries:       0,
-    successful_queries:  0,
-    failed_queries:      0,
-    total_usdc_paid:     0,
-  },
-};
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DB_PATH   = path.join(__dirname, "../../data/nodusai-registry.json");
 
 function loadDB() {
-  if (!existsSync(DB_PATH)) {
-    writeFileSync(DB_PATH, JSON.stringify(DEFAULT_DB, null, 2));
-    return structuredClone(DEFAULT_DB);
+  try {
+    if (!fs.existsSync(DB_PATH)) {
+      fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+      saveDB({ agents: {}, queries: [] });
+    }
+    return JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
+  } catch {
+    return { agents: {}, queries: [] };
   }
-  return JSON.parse(readFileSync(DB_PATH, "utf-8"));
 }
 
 function saveDB(db) {
-  writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
 // ── Agents ─────────────────────────────────────────────────────────────────────
 export function registerAgent({ name, walletAddress }) {
-  const db = loadDB();
-  // Idempotent: same wallet address = same agent record
-  const existing = Object.values(db.agents).find(a => a.walletAddress === walletAddress);
-  if (existing) return existing;
-  const agent = {
-    id: randomUUID(),
-    name,
-    walletAddress,
-    createdAt: new Date().toISOString(),
-  };
-  db.agents[agent.id] = agent;
+  const db  = loadDB();
+  const key = walletAddress.toLowerCase();
+  if (!db.agents[key]) {
+    db.agents[key] = {
+      id:            uuidv4(),
+      name,
+      walletAddress: key,
+      createdAt:     new Date().toISOString(),
+      totalQueries:  0,
+    };
+  } else {
+    db.agents[key].name = name || db.agents[key].name;
+  }
   saveDB(db);
-  return agent;
+  return db.agents[key];
 }
 
 export function getAgentByWallet(walletAddress) {
   const db = loadDB();
-  return Object.values(db.agents).find(a => a.walletAddress === walletAddress) || null;
+  return db.agents[walletAddress.toLowerCase()] || null;
 }
 
-// ── Sessions ───────────────────────────────────────────────────────────────────
-export function createSession({ agentId, usdcPaid, queriesTotal, txReference }) {
-  const db = loadDB();
-  const token = `nodus_sess_${randomUUID().replace(/-/g, "")}`;
-  const session = {
-    token,
-    agentId,
-    usdcPaid,
-    txReference,
-    queryCount: 0,
-    queriesTotal: queriesTotal || 3,
-    createdAt:  new Date().toISOString(),
-    // Sessions valid for 24 hours — aligns with NodusAI session-based access model
-    expiresAt:  new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-  };
-  db.sessions[token] = session;
-  saveDB(db);
-  return session;
-}
-
-export function validateSession(token) {
-  const db = loadDB();
-  const session = db.sessions[token];
-  if (!session) return { valid: false, reason: "Session token not found" };
-  if (new Date() > new Date(session.expiresAt)) return { valid: false, reason: "Session expired" };
-  return { valid: true, session };
-}
-
-export function incrementSessionQueryCount(token) {
-  const db = loadDB();
-  if (db.sessions[token]) {
-    db.sessions[token].queryCount++;
-    saveDB(db);
-  }
-}
-
-// ── Query Registry (core) ──────────────────────────────────────────────────────
-/**
- * logQuery — writes one entry to the NodusAI query registry.
- *
- * Each entry captures the full lifecycle of a signal request:
- *   input  → marketUrl, agentId, sessionToken
- *   output → the full NodusAI signal JSON (or error)
- *   billing → usdcCost, paymentMethod, txReference
- */
+// ── Queries ────────────────────────────────────────────────────────────────────
 export function logQuery({
   agentId,
   agentName,
   marketUrl,
-  platform,         // "polymarket" | "kalshi" | "unknown"
+  platform,
   sessionToken,
-  paymentMethod,    // "session" | "direct_x402"
-  usdcCost,
-  txReference,
-  signal,           // full Oracle JSON output
+  desiredOutcome,
+  signal,
   success,
   errorMessage,
 }) {
-  const db = loadDB();
-
+  const db    = loadDB();
   const entry = {
-    id:            randomUUID(),
-    agentId,
-    agentName,
+    id:             uuidv4(),
+    agentId:        agentId || "anonymous",
+    agentName:      agentName || "anonymous",
     marketUrl,
     platform,
-    sessionToken,
-    paymentMethod,
-    usdcCost,
-    txReference:   txReference || null,
-    // Signal — the NodusAI structured output (null on failure)
-    signal: success ? {
-      market_name:      signal.market_name,
-      predicted_outcome: signal.predicted_outcome,
-      probability:       signal.probability,
-      confidence_score:  signal.confidence_score,
-      key_reasoning:     signal.key_reasoning,
-      grounding_sources: signal.grounding_sources || [],
-    } : null,
+    sessionToken:   sessionToken ? sessionToken.slice(0, 8) + "..." : null,
+    desiredOutcome: desiredOutcome || null,
+    signal:         success ? signal : null,
     success,
-    errorMessage:  success ? null : errorMessage,
-    timestamp:     new Date().toISOString(),
+    errorMessage:   success ? null : errorMessage,
+    timestamp:      new Date().toISOString(),
   };
-
   db.queries.push(entry);
-  db.stats.total_queries++;
-  if (success) {
-    db.stats.successful_queries++;
-    db.stats.total_usdc_paid = parseFloat(
-      (db.stats.total_usdc_paid + usdcCost).toFixed(6)
-    );
-  } else {
-    db.stats.failed_queries++;
-  }
 
+  // Update agent query count
+  if (agentId && agentId !== "anonymous") {
+    for (const agent of Object.values(db.agents)) {
+      if (agent.id === agentId) {
+        agent.totalQueries = (agent.totalQueries || 0) + 1;
+        break;
+      }
+    }
+  }
   saveDB(db);
   return entry;
 }
 
-// ── Analytics ──────────────────────────────────────────────────────────────────
-export function getStats() {
-  const db = loadDB();
-  const queries = db.queries;
-
-  const byPlatform = queries.reduce((acc, q) => {
-    acc[q.platform] = (acc[q.platform] || 0) + 1;
-    return acc;
-  }, {});
-
-  const byConfidence = queries
-    .filter(q => q.success && q.signal)
-    .reduce((acc, q) => {
-      const c = q.signal.confidence_score;
-      acc[c] = (acc[c] || 0) + 1;
-      return acc;
-    }, {});
-
-  const recentQueries = queries.slice(-10).reverse().map(q => ({
-    id:        q.id,
-    marketUrl: q.marketUrl,
-    platform:  q.platform,
-    outcome:   q.signal?.predicted_outcome || "N/A",
-    probability: q.signal?.probability ?? null,
-    confidence:  q.signal?.confidence_score || null,
-    success:   q.success,
-    timestamp: q.timestamp,
-  }));
-
-  return {
-    ...db.stats,
-    byPlatform,
-    byConfidence,
-    recentQueries,
-    registeredAgents: Object.keys(db.agents).length,
-    activeSessions:   Object.values(db.sessions).filter(
-      s => new Date() < new Date(s.expiresAt)
-    ).length,
-  };
-}
-
-export function getQueryHistory(agentId, limit = 50) {
+export function getQueryHistory(agentId, limit = 20) {
   const db = loadDB();
   return db.queries
     .filter(q => q.agentId === agentId)
@@ -218,7 +101,25 @@ export function getQueryHistory(agentId, limit = 50) {
     .reverse();
 }
 
-export function getAllQueries(limit = 100) {
+export function getAllQueries(limit = 50) {
   const db = loadDB();
   return db.queries.slice(-limit).reverse();
+}
+
+export function getStats() {
+  const db       = loadDB();
+  const queries  = db.queries;
+  const byPlatform = {};
+  for (const q of queries) {
+    byPlatform[q.platform] = (byPlatform[q.platform] || 0) + 1;
+  }
+  return {
+    total_queries:   queries.length,
+    total_agents:    Object.keys(db.agents).length,
+    success_rate:    queries.length
+      ? Math.round((queries.filter(q => q.success).length / queries.length) * 100) + "%"
+      : "N/A",
+    by_platform:     byPlatform,
+    last_query:      queries.at(-1)?.timestamp || null,
+  };
 }
