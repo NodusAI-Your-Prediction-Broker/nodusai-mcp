@@ -1,6 +1,6 @@
 {
-  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "$schema": "https://glama.ai/mcp/servers/NodusAI-Your-Prediction-Broker/nodusai-mcp-server",
   "maintainers": [
-    "your-github-username"
+    "luacantu"
   ]
 }
