@@ -32,39 +32,34 @@ jobs:
             // 1. Pricing
             const p = await t.nodusPricing();
             const pd = JSON.parse(p.content[0].text);
-            if (!pd.per_query) throw new Error('Pricing failed');
+            if (!pd.pricing?.cost) throw new Error('Pricing failed: ' + JSON.stringify(pd));
 
-            // 2. Mock payment
-            const mp = await t.nodusMockPayment({});
-            const mpd = JSON.parse(mp.content[0].text);
-            if (!mpd.xPaymentHeader) throw new Error('Mock payment failed');
-
-            // 3. Get signal
+            // 2. Get signal with session token
             const s = await t.nodusGetSignal({
-              marketUrl: 'https://polymarket.com/event/test',
-              xPaymentHeader: mpd.xPaymentHeader,
-              walletAddress: '0xTestWallet',
-              agentName: 'CI-Test-Agent',
+              marketUrl:      'https://polymarket.com/event/test',
+              sessionToken:   'mock-session-token-ci',
+              desiredOutcome: 'YES',
+              walletAddress:  '0xTestWallet',
+              agentName:      'CI-Test-Agent',
             });
             const sd = JSON.parse(s.content[0].text);
-            if (!sd.signal?.probability) throw new Error('Signal failed');
+            if (!sd.signal?.probability) throw new Error('Signal failed: ' + JSON.stringify(sd));
 
-            // 4. Session query
-            const sq = await t.nodusQueryWithSession({
-              marketUrl: 'https://kalshi.com/markets/test',
-              sessionToken: sd.session.token,
-            });
-            const sqd = JSON.parse(sq.content[0].text);
-            if (!sqd.signal) throw new Error('Session query failed');
+            // 3. Verify signal
+            const v = await t.nodusVerifySignal({ queryId: sd.queryId });
+            const vd = JSON.parse(v.content[0].text);
+            if (!vd.verified) throw new Error('Verify failed: ' + JSON.stringify(vd));
 
-            // 5. Admin stats
+            // 4. Admin stats
             const a = await t.nodusAdminStats();
             const ad = JSON.parse(a.content[0].text);
-            if (ad.total_queries < 1) throw new Error('Stats failed');
+            if (ad.total_queries < 1) throw new Error('Stats failed: ' + JSON.stringify(ad));
 
-            console.log('All tests passed ✅');
-            console.log('total_queries:', ad.total_queries);
-            console.log('signal probability:', sd.signal.probability);
+            console.log('All tests passed');
+            console.log('pricing:', pd.pricing.cost);
+            console.log('probability:', sd.signal.probability);
+            console.log('confidence:', sd.signal.confidence_score);
+            console.log('total queries:', ad.total_queries);
           }).catch(e => { console.error(e); process.exit(1); });
           "
 
