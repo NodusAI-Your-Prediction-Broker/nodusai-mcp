@@ -8,12 +8,11 @@
     "nodusai-mcp": "./src/index.js"
   },
   "scripts": {
-    "start":      "node src/index.js",
+    "start": "node src/index.js",
     "start:http": "node src/server-http.js",
-    "dev":        "NODUSAI_MOCK=true node --watch src/index.js",
-    "dev:http":   "NODUSAI_MOCK=true node --watch src/server-http.js",
-    "agent:js":   "node examples/agent-js/agent.js",
-    "agent:py":   "python examples/agent-python/agent.py"
+    "dev": "NODUSAI_MOCK=true node --watch src/index.js",
+    "dev:http": "NODUSAI_MOCK=true node --watch src/server-http.js",
+    "agent:js": "node examples/agent-js/agent.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
